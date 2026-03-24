@@ -445,6 +445,47 @@ if [[ "$TARGET" == "all" || "$TARGET" == "tier14" || "$TARGET" == "V104" ]]; the
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TIER 15 — LoRA TTT: Rank-8 Q/V Adapters at Test-Time (competition frontier)
+# ═══════════════════════════════════════════════════════════════════════════════
+# PR #596 (0.6430 BPB), PR #605 (0.7227), PR #611 Chimera (0.5601 BPB)
+# Key insight: ~125–200× fewer trainable params than full TTT → more epochs per
+# chunk in the same 600s wall clock. Per-chunk LoRA reset = document adaptation.
+#
+#   V105: LoRA TTT baseline — rank-8 Q/V, 50 epochs, cosine LR, SOTA stack.
+#         Expected ~0.65–0.75 BPB (vs 1.0622 full-param TTT baseline).
+#
+#   V106: LoRA TTT "Chimera" — V105 + K-LoRA (0.3× LR) + min-NLL selection +
+#         temperature calibration (T=0.98). Mirrors PR #611 configuration.
+#         Expected ~0.56–0.64 BPB (competition frontier).
+#
+#   V107: V106 + 100 epochs. LoRA efficiency lets us run 2× more epochs
+#         in the same wall clock as full-param 50-epoch TTT.
+#         Expected ~0.54–0.60 BPB.
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier15" || "$TARGET" == "V105" ]]; then
+  run_rp "V105_lora_ttt_base" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT MLP_ACTIVATION=leaky_relu2 \
+     TTT_LORA=1 TTT_EPOCHS=50 TTT_LR=3e-4 TTT_LORA_RANK_QV=8"
+fi
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier15" || "$TARGET" == "V106" ]]; then
+  run_rp "V106_lora_ttt_chimera" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT MLP_ACTIVATION=leaky_relu2 \
+     TTT_LORA=1 TTT_EPOCHS=50 TTT_LR=3e-4 TTT_LORA_RANK_QV=8 TTT_LORA_RANK_LM=16 \
+     TTT_K_LORA=1 TTT_MIN_NLL=1 TTT_TEMPERATURE=0.98"
+fi
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier15" || "$TARGET" == "V107" ]]; then
+  run_rp "V107_lora_ttt_chimera_100ep" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT MLP_ACTIVATION=leaky_relu2 \
+     TTT_LORA=1 TTT_EPOCHS=100 TTT_LR=3e-4 TTT_LORA_RANK_QV=8 TTT_LORA_RANK_LM=16 \
+     TTT_K_LORA=1 TTT_MIN_NLL=1 TTT_TEMPERATURE=0.98"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""

@@ -219,6 +219,17 @@ class Hyperparameters:
     ttt_lr = float(os.environ.get("TTT_LR", 1e-4))
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 0))  # 0 = same as train_seq_len
 
+    # LoRA TTT: rank-r adapters on Q/V (+ optionally K/lm_head) during test-time training.
+    # ~125–200× fewer trainable params than full TTT → more epochs per chunk in same wall-clock.
+    # Evidence: PR #596 (0.6430 BPB), PR #605 (0.7227), PR #611 (0.5601) — competition frontier.
+    # Per-chunk LoRA reset enables document-level adaptation without cross-contamination.
+    ttt_lora = bool(int(os.environ.get("TTT_LORA", 0)))
+    ttt_lora_rank_qv = int(os.environ.get("TTT_LORA_RANK_QV", 8))    # rank for Q/V (and K) LoRA
+    ttt_lora_rank_lmhead = int(os.environ.get("TTT_LORA_RANK_LM", 16))  # rank for lm_head LoRA
+    ttt_k_lora = bool(int(os.environ.get("TTT_K_LORA", 0)))          # also LoRA K at 0.3× LR
+    ttt_min_nll = bool(int(os.environ.get("TTT_MIN_NLL", 0)))         # track min-NLL epoch per chunk
+    ttt_temperature = float(os.environ.get("TTT_TEMPERATURE", 1.0))   # post-TTT logit temperature
+
     # WSM — Warmup-Stable-Merge (arXiv:2507.17634).
     # Replaces LR warmdown entirely with constant-LR training + post-training checkpoint merge.
     # Key insight: merging N checkpoints from the stable-LR phase approximates LR decay
@@ -449,8 +460,9 @@ def eval_val(
     # seq_len tokens but only score the last `stride` tokens per window. This gives
     # every scored token ~(seq_len - stride) tokens of context.
     if args.ttt_epochs > 0:
-        return _eval_val_ttt(args, model, rank, world_size, device, val_tokens,
-                             base_bytes_lut, has_leading_space_lut, is_boundary_token_lut)
+        _ttt_fn = _eval_val_lora_ttt if getattr(args, 'ttt_lora', False) else _eval_val_ttt
+        return _ttt_fn(args, model, rank, world_size, device, val_tokens,
+                       base_bytes_lut, has_leading_space_lut, is_boundary_token_lut)
 
     stride = args.eval_stride
     seq_len = args.train_seq_len
@@ -690,6 +702,157 @@ def _eval_val_ttt(
 
     # Restore original trained weights (TTT is eval-only, doesn't affect training)
     raw_model.load_state_dict(orig_state)
+    raw_model.train()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_token_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_byte_count, op=dist.ReduceOp.SUM)
+
+    val_loss = val_loss_sum / val_token_count
+    bits_per_token = val_loss.item() / math.log(2.0)
+    tokens_per_byte = val_token_count.item() / val_byte_count.item()
+    return float(val_loss.item()), float(bits_per_token * tokens_per_byte)
+
+
+def _eval_val_lora_ttt(
+    args: Hyperparameters,
+    model: nn.Module,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+) -> tuple[float, float]:
+    """LoRA TTT: low-rank adapter-only test-time training.
+
+    ~125–200× fewer trainable params than full TTT enables more epochs per chunk.
+    Per-chunk LoRA reset gives document-level adaptation without cross-contamination.
+    Outer cosine LR over chunks; inner cosine LR over epochs within each chunk.
+
+    Evidence: PR #596 (0.6430 BPB), PR #605 (0.7227), PR #611 Chimera (0.5601 BPB).
+    K-LoRA at 0.3× LR (PR #611), min-NLL epoch selection (PR #611), T=0.98 (PR #576).
+    """
+    raw_model = model
+    while hasattr(raw_model, "module"):
+        raw_model = raw_model.module
+    while hasattr(raw_model, "_orig_mod"):
+        raw_model = raw_model._orig_mod
+
+    chunk_size = args.ttt_chunk_size if args.ttt_chunk_size > 0 else args.train_seq_len
+    total_tokens = val_tokens.numel() - 1
+    total_chunks = (total_tokens + chunk_size - 1) // chunk_size
+    rank_chunk_start = (total_chunks * rank) // world_size
+    rank_chunk_end = (total_chunks * (rank + 1)) // world_size
+
+    # Collect LoRA targets: (module_name, module, lora_rank, lr_multiplier)
+    lora_targets: list[tuple[str, CastedLinear, int, float]] = []
+    for name, mod in raw_model.named_modules():
+        if not isinstance(mod, CastedLinear):
+            continue
+        tail = name.rsplit(".", 1)[-1]
+        if tail in ("c_q", "c_v"):
+            lora_targets.append((name, mod, args.ttt_lora_rank_qv, 1.0))
+        elif tail == "c_k" and args.ttt_k_lora:
+            lora_targets.append((name, mod, args.ttt_lora_rank_qv, 0.3))
+        elif name == "lm_head":
+            lora_targets.append((name, mod, args.ttt_lora_rank_lmhead, 1.0))
+
+    # Freeze all base parameters (only LoRA A/B will receive gradients)
+    for p in raw_model.parameters():
+        p.requires_grad_(False)
+
+    val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    val_token_count = torch.zeros((), device=device, dtype=torch.float64)
+    val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
+
+    for chunk_idx in range(rank_chunk_start, rank_chunk_end):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = min(chunk_start + chunk_size, total_tokens)
+        if chunk_start >= chunk_end:
+            break
+
+        # Outer cosine LR decay over the full eval sequence
+        t_outer = chunk_idx / max(total_chunks - 1, 1)
+        base_lr = 0.5 * args.ttt_lr * (1.0 + math.cos(math.pi * t_outer))
+
+        local = val_tokens[chunk_start:chunk_end + 1].to(device=device, dtype=torch.int64, non_blocking=True)
+        x = local[:-1].unsqueeze(0)   # [1, chunk_len]
+        y = local[1:].unsqueeze(0)    # [1, chunk_len]
+
+        # Per-chunk LoRA init: A ~ N(0, 1/sqrt(r)), B = 0 → delta starts at zero
+        param_groups = []
+        for nm, mod, r, lr_mult in lora_targets:
+            out_f, in_f = mod.weight.shape
+            A = torch.randn(r, in_f, device=device, dtype=torch.float32).div_(math.sqrt(r)).requires_grad_(True)
+            B = torch.zeros(out_f, r, device=device, dtype=torch.float32).requires_grad_(True)
+            mod._lora_A = A
+            mod._lora_B = B
+            param_groups.append({"params": [A, B], "lr": base_lr * lr_mult, "_lr_mult": lr_mult})
+
+        ttt_opt = torch.optim.AdamW(param_groups, weight_decay=0.0, betas=(0.9, 0.95))
+
+        # Inner TTT loop with cosine LR over epochs
+        raw_model.train()
+        best_nll = float("inf")
+        best_lora: dict[str, tuple[Tensor, Tensor]] = {}
+
+        for epoch in range(args.ttt_epochs):
+            t_inner = epoch / max(args.ttt_epochs - 1, 1)
+            lr_scale = 0.5 * (1.0 + math.cos(math.pi * t_inner))
+            for pg in ttt_opt.param_groups:
+                pg["lr"] = base_lr * pg["_lr_mult"] * lr_scale
+
+            ttt_opt.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                loss = raw_model(x, y)
+            loss.backward()
+            ttt_opt.step()
+
+            # Min-NLL: snapshot LoRA at the epoch with the lowest NLL
+            if args.ttt_min_nll and loss.item() < best_nll:
+                best_nll = loss.item()
+                best_lora = {nm: (mod._lora_A.detach().clone(), mod._lora_B.detach().clone())
+                             for nm, mod, r, _ in lora_targets}
+
+        # Restore best-epoch LoRA state if min-NLL mode (prevents overfitting on short chunks)
+        if args.ttt_min_nll and best_lora:
+            for nm, mod, r, _ in lora_targets:
+                mod._lora_A = best_lora[nm][0]
+                mod._lora_B = best_lora[nm][1]
+
+        # Score chunk; optional temperature calibration (T<1 → more confident → lower BPB)
+        raw_model.eval()
+        with torch.inference_mode():
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                if args.ttt_temperature != 1.0:
+                    logits = raw_model._get_logits(x)
+                    logits = logits / args.ttt_temperature
+                    chunk_loss = F.cross_entropy(
+                        logits.float().reshape(-1, logits.size(-1)), y.reshape(-1)
+                    ).detach()
+                else:
+                    chunk_loss = raw_model(x, y).detach()
+
+        # Remove LoRA from modules before next chunk
+        for nm, mod, r, _ in lora_targets:
+            del mod._lora_A
+            del mod._lora_B
+
+        num_tokens = float(y.numel())
+        val_loss_sum += chunk_loss.to(torch.float64) * num_tokens
+        val_token_count += num_tokens
+        prev_ids = x.reshape(-1)
+        tgt_ids = y.reshape(-1)
+        token_bytes = base_bytes_lut[tgt_ids].to(dtype=torch.int16)
+        token_bytes += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
+        val_byte_count += token_bytes.to(torch.float64).sum()
+
+    # Restore base parameter gradients so training loop can continue
+    for p in raw_model.parameters():
+        p.requires_grad_(True)
     raw_model.train()
 
     if dist.is_available() and dist.is_initialized():
@@ -1009,6 +1172,11 @@ class CastedLinear(nn.Linear):
         if (CastedLinear._ste_qat or CastedLinear._lotion) and w.ndim == 2 and not getattr(self, "_zero_init", False):
             bits = CastedLinear._ste_qat_bits
             w = lotion_quantize(w, bits=bits) if CastedLinear._lotion else ste_quantize(w, bits=bits)
+        # LoRA TTT: add low-rank delta B@A to base weight (both are fp32, grad flows through A/B)
+        lora_A = getattr(self, '_lora_A', None)
+        lora_B = getattr(self, '_lora_B', None)
+        if lora_A is not None and lora_B is not None:
+            w = w.float() + lora_B @ lora_A  # [out_f, in_f]; requires_grad via lora_A/B
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w.to(x.dtype), bias)
 
