@@ -256,13 +256,13 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 
 ### TIER A — High value, manageable complexity
 
-#### Differential Transformer (arXiv:2410.05258, ICLR 2025 Oral) [CODE]
+#### ✅ Differential Transformer (arXiv:2410.05258, ICLR 2025 Oral) [CODE] **IMPLEMENTED**
 - **What**: Replaces softmax attention with `softmax(Q₁K^T) − λ·softmax(Q₂K^T)`. The subtraction cancels attention noise, producing sparse focused patterns. One extra learnable scalar λ per head.
 - **Why it applies**: At 6-bit quantization, Diff Transformer retains near-FP16 quality while vanilla Transformer accuracy drops sharply. Activation outlier kurtosis is dramatically reduced — directly addresses int6 degradation. 4-bit DiffTransformer outperforms 6-bit vanilla by ~25% on zero-shot benchmarks.
 - **GQA interaction**: Each KV head serves (Q_pos, Q_neg) pairs. With NUM_KV_HEADS=4 and NUM_HEADS=8, each KV group serves 2 heads: one positive, one negative query.
 - **Expected gain**: −0.008 to −0.018 BPB (through better quantization robustness)
-- **Implementation complexity**: Medium. Requires splitting Q projection 2× and managing λ per head.
-- **Control var**: `DIFF_TRANSFORMER=1`
+- **Implementation**: head_dim halved, two sub-heads Q1/Q2 + K1/K2 sharing same V (2×head_dim). Lambda init = 0.8 - 0.6·exp(-0.3·depth). XSA auto-disabled (V shape incompatible).
+- **Control var**: `DIFF_TRANSFORMER=1` → V90-V92 in run_runpod.sh
 
 #### QuaRot — Hadamard Rotation (arXiv:2404.00456, NeurIPS 2024) [CODE]
 - **What**: Applies random Hadamard rotation to hidden states before quantization. Rotation preserves the function (mathematically invariant) but distributes outlier energy uniformly across all dimensions → quantization grids become much more efficient.
@@ -270,11 +270,11 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 - **Expected gain**: −0.003 to −0.008 BPB on top of TWEO
 - **Implementation complexity**: Medium. Offline weight rotation at export time.
 
-#### WSM — Checkpoint Merging (arXiv:2507.17634)
+#### ✅ WSM — Checkpoint Merging (arXiv:2507.17634) **IMPLEMENTED**
 - **What**: Replaces LR decay phase entirely with averaging a window of checkpoints collected during constant-LR phase. Keeps LR high throughout → more training signal. WSD+merge outperforms WSD by +3.5% MATH, +2.9% HumanEval.
 - **Why it applies**: SWA infrastructure is already in place. The change is to trigger the merge at the end of stable-LR phase rather than during decay. Competition submits the merged checkpoint.
 - **Expected gain**: −0.003 to −0.006 BPB
-- **Control var**: Modify `TIGHT_SWA` trigger condition
+- **Control var**: `WSM=1 WSM_MERGE_FRACTION=0.3 SWA_INTERVAL=50` → V86-V89 in run_runpod.sh
 
 #### MUDDFormer (arXiv:2502.12170) *(from prior survey — highest priority novel architecture)*
 - **What**: Dense connections from ALL previous layers to current layer, gated by learned fusion weights. Unlike U-Net (skip every 4 layers), every token representation incorporates all preceding layer states.
@@ -299,25 +299,26 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 - **Expected gain**: −0.001 to −0.004 BPB
 - **Implementation complexity**: Low — add EMA tracking per group in optimizer step.
 
-#### HybridNorm variant — Peri-LN (arXiv:2502.02732, ICML 2025)
+#### ✅ HybridNorm variant — Peri-LN (arXiv:2502.02732, ICML 2025) **IMPLEMENTED**
 - **What**: Places LayerNorm on BOTH input AND output of each sublayer. Unifies Pre-LN and output-LN. Used in Gemma, OLMo families.
 - **Expected gain**: −0.002 to −0.006 BPB (alternative to HybridNorm, test one)
+- **Control var**: `PERI_LN=1` (mutually exclusive with HYBRID_NORM) → V93-V94 in run_runpod.sh
 
 ### Summary Table
 
-| Paper | arXiv | Tier | Expected BPB | Complexity | Code |
-|-------|-------|------|-------------|------------|------|
-| HybridNorm | 2503.04598 | S | −0.003/−0.008 | Low | Yes |
-| OSP SSNorm | 2506.19697 | S | −0.005/−0.012 | Low | Yes |
-| Optimal LR decay | 2602.06797 | S | −0.002/−0.005 | Low | No |
-| Differential Transformer | 2410.05258 | A | −0.008/−0.018 | Med | Yes |
-| QuaRot | 2404.00456 | A | −0.003/−0.008 | Med | Yes |
-| WSM Merging | 2507.17634 | A | −0.003/−0.006 | Low | No |
-| MUDDFormer | 2502.12170 | A | −0.020/−0.040 | High | Yes |
-| NuMuon | 2603.03597 | A | −0.003/−0.008 | Low | No |
-| MASA | 2508.04581 | B | −0.005/−0.015 | High | No |
-| AGGC | 2601.11864 | B | −0.001/−0.004 | Low | No |
-| Peri-LN | 2502.02732 | B | −0.002/−0.006 | Low | No |
+| Paper | arXiv | Tier | Expected BPB | Complexity | Status |
+|-------|-------|------|-------------|------------|--------|
+| HybridNorm | 2503.04598 | S | −0.003/−0.008 | Low | ✅ HYBRID_NORM=1 |
+| OSP SSNorm | 2506.19697 | S | −0.005/−0.012 | Low | ✅ SSNORM=1 |
+| Optimal LR decay | 2602.06797 | S | −0.002/−0.005 | Low | ✅ WSD_POWER=2.0 (approx) |
+| Differential Transformer | 2410.05258 | A | −0.008/−0.018 | Med | ✅ DIFF_TRANSFORMER=1 |
+| QuaRot | 2404.00456 | A | −0.003/−0.008 | Med | pending research |
+| WSM Merging | 2507.17634 | A | −0.003/−0.006 | Low | ✅ WSM=1 |
+| MUDDFormer | 2502.12170 | A | −0.020/−0.040 | High | pending research |
+| NuMuon | 2603.03597 | A | −0.003/−0.008 | Low | pending (compressibility) |
+| MASA | 2508.04581 | B | −0.005/−0.015 | High | todo |
+| AGGC | 2601.11864 | B | −0.001/−0.004 | Low | todo |
+| Peri-LN | 2502.02732 | B | −0.002/−0.006 | Low | ✅ PERI_LN=1 |
 
 *Stacking all Tier S+A techniques (assuming 0.6× synergy discount): estimated −0.050 to −0.100 BPB over existing SOTA stack.*
 
