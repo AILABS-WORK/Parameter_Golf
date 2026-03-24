@@ -276,10 +276,17 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 - **Expected gain**: −0.003 to −0.006 BPB
 - **Control var**: `WSM=1 WSM_MERGE_FRACTION=0.3 SWA_INTERVAL=50` → V86-V89 in run_runpod.sh
 
-#### MUDDFormer (arXiv:2502.12170) *(from prior survey — highest priority novel architecture)*
+#### ✅ MUDDFormer (arXiv:2502.12170) **IMPLEMENTED (simplified variant — see discrepancy note)**
 - **What**: Dense connections from ALL previous layers to current layer, gated by learned fusion weights. Unlike U-Net (skip every 4 layers), every token representation incorporates all preceding layer states.
 - **Why it applies**: NOT in any competition submission. Expected to be the largest single novel architecture gain.
-- **Expected gain**: −0.020 to −0.040 BPB
+- **Expected gain**: −0.020 to −0.040 BPB (full official version); our simplified variant likely captures 40-60% of this gain.
+- **Control var**: `MUDD_STREAMS=1/2/3` → V84 in run_runpod.sh
+- **⚠️ IMPLEMENTATION DISCREPANCY** (vs official github.com/Caiyun-AI/MUDDFormer):
+  1. **Missing R stream**: Official uses 4-stream (Q/K/V/R) `MultiwayDynamicDenseBlock` with C=4; our implementation uses 1-3 streams (no residual stream R).
+  2. **Weight generation**: Official uses 2-layer MLP (`w1: D→C*(l+2)` → GELU → `w2: C*(l+2)→C*(l+2)`) per timestep; ours uses a single linear projection (attention-like weights).
+  3. **Missing static bias**: Official initializes `dense_bs` with `torch.randn` and adds it as a static offset in the einsum path; ours has no equivalent.
+  4. **Fusion op**: Official uses `einsum('LBTD, CBTL -> CBTD', H, dw)` to fuse all layer hiddens; our variant approximates this but lacks the R residual path.
+- **Recommendation**: Consider implementing `MUDD_OFFICIAL=1` following the exact official architecture to unlock the full expected gain. Low regression risk (additive variant).
 
 ### TIER B — Research-grade, higher implementation effort
 
@@ -332,6 +339,28 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 - **At eval time**: Falls back to hard quantization (noise injection only active when `torch.is_grad_enabled()`).
 - **Control var**: `LOTION=1 QAT_START_FRACTION=0.0` → V102 in run_runpod.sh
 
+#### Attention Residuals (arXiv:2603.15031, Kimi/MoonshotAI) *(March 2026 SOTA — deployed at 48B scale)*
+- **What**: Each layer maintains a bank of per-layer trainable query vectors `q_l ∈ R^{d_model}`. At each layer, computes softmax attention over the full sequence of ALL prior hidden states (concatenated across layers), producing a "memory readout" vector added to the residual stream. Essentially a global read-only attention over all past computation.
+- **Why it works**: Standard residual stream carries information forward linearly; any layer can only "see" the immediately preceding layer's output. Attention Residuals let each layer directly attend to the richest intermediate representation from any prior layer — the model learns which layer's abstraction is most useful for each position. Deployed at 48B scale by MoonshotAI; code at github.com/MoonshotAI/Attention-Residuals.
+- **Why it applies**: Not yet in any competition submission. The per-layer query vectors are tiny (~d_model per layer = ~10K params total at our scale). Cross-layer attention is computed once per layer — adds ~O(L) attention ops but over a compressed hidden sequence, not the token sequence.
+- **Implementation challenge**: Official code targets large-scale pretraining; small-model adaptation needed (need to stack and maintain all layer hiddens in a memory buffer, then attend to them with lightweight per-layer queries). Moderate complexity.
+- **Expected gain**: −0.010 to −0.025 BPB (extrapolated from large-scale results)
+- **Control var**: `ATTN_RESIDUALS=1` (not yet implemented)
+
+#### ExoFormer — Exogenous Attention (arXiv:2601.08131)
+- **What**: Augments standard causal self-attention with a secondary "exogenous" attention head that reads from a fixed external context buffer (document summaries, retrieved chunks, or prior-layer hiddens). The exogenous attention is gated by a learned mixing coefficient, preventing it from dominating the self-attention signal.
+- **Why it applies**: In the competition setting, the "exogenous" buffer could be populated with compressed representations from earlier in the document (beyond the 1024-token context window), effectively extending the model's receptive field without increasing sequence length.
+- **Expected gain**: −0.005 to −0.012 BPB
+- **Implementation complexity**: Medium — requires secondary attention module and a mechanism to populate the exogenous buffer.
+- **Control var**: `EXOFORMER=1` (not yet implemented)
+
+#### DeepCrossAttention (arXiv:2502.06785)
+- **What**: Cross-attention between even-numbered and odd-numbered layers, where each layer attends to the "partner" layer's key-value projections in addition to its own self-attention. Creates a "ladder" of cross-layer information exchange without the memory cost of full dense connections.
+- **Why it applies**: More parameter-efficient than MUDDFormer (only L/2 extra KV projections) while still enabling cross-layer information flow. The ladder structure introduces long-range inductive bias that vanilla residual streams lack.
+- **Expected gain**: −0.006 to −0.015 BPB
+- **Implementation complexity**: Medium — requires shared KV buffers between layer pairs.
+- **Control var**: `DEEP_CROSS_ATTN=1` (not yet implemented)
+
 ### Summary Table
 
 | Paper | arXiv | Tier | Expected BPB | Complexity | Status |
@@ -342,13 +371,17 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 | Differential Transformer | 2410.05258 | A | −0.008/−0.018 | Med | ✅ DIFF_TRANSFORMER=1 |
 | QuaRot | 2404.00456 | A | −0.003/−0.008 | Med | pending research |
 | WSM Merging | 2507.17634 | A | −0.003/−0.006 | Low | ✅ WSM=1 |
-| MUDDFormer | 2502.12170 | A | −0.015/−0.035 | High | ✅ MUDD_STREAMS=1/3 |
+| MUDDFormer (simplified) | 2502.12170 | A | −0.006/−0.021 | High | ✅ MUDD_STREAMS=1/3 ⚠️ missing R-stream/MLP |
 | NuMuon | 2603.03597 | A | −0.003/−0.008 | Low | ✅ NUMUON_WEIGHT=1e-4 |
 | Gated Attention | 2505.06708 | S | −0.005/−0.015 | Low | ✅ GATED_ATTN=1 |
 | Muon-VS | 2601.14603 | S | −0.005/−0.012 | Low | ✅ MUON_VS=1 |
 | LOTION | 2510.08757 | A | −0.005/−0.015 | Low | ✅ LOTION=1 |
 | MASA | 2508.04581 | B | −0.005/−0.015 | High | todo |
 | AGGC | 2601.11864 | B | −0.001/−0.004 | Low | ✅ AGGC_BETA=0.99 |
+| Attention Residuals | 2603.15031 | S | −0.010/−0.025 | Med | todo ATTN_RESIDUALS=1 |
+| ExoFormer | 2601.08131 | B | −0.005/−0.012 | Med | todo EXOFORMER=1 |
+| DeepCrossAttention | 2502.06785 | B | −0.006/−0.015 | Med | todo DEEP_CROSS_ATTN=1 |
+| MUDD_OFFICIAL | 2502.12170 | A | −0.015/−0.040 | High | todo (full R-stream+MLP variant) |
 | Peri-LN | 2502.02732 | B | −0.002/−0.006 | Low | ✅ PERI_LN=1 |
 | DenseFormer DWA | 2402.02622 | B | −0.008/−0.015 | Trivial | ✅ DENSEFORMER=1 |
 
