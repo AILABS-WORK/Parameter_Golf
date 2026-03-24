@@ -14,6 +14,9 @@
 #   bash run_benchmark.sh novel2          # beyond SOTA: Tight SWA, Overtone Init, Phase ResidMix, novel combos
 #   bash run_benchmark.sh activ           # activation variants: LeakyReLU², SwiGLU (from unmerged PRs)
 #   bash run_benchmark.sh ttt             # Cosine TTT variants (sub-1.1 BPB frontier, slower eval)
+#   bash run_benchmark.sh layer9          # HybridNorm + SSNorm ablations (V80-V85)
+#   bash run_benchmark.sh diff_attn       # Differential Transformer ablations (V90-V92)
+#   bash run_benchmark.sh peri_ln         # Peri-LN ablations (V93-V94)
 #   bash run_benchmark.sh V44             # single variant by ID
 #
 # Output:
@@ -586,6 +589,47 @@ if [[ "$TARGET" == "layer9" || "$TARGET" == "V85" ]]; then
     "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
      GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd WARMDOWN_ITERS=3500 \
      HYBRID_NORM=1"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIFF ATTN GROUP (V90-V92) — Differential Transformer (arXiv:2410.05258)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ "$TARGET" == "diff_attn" || "$TARGET" == "V90" ]]; then
+  run_bench "V90_diff_attn" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     DIFF_TRANSFORMER=1"
+fi
+
+if [[ "$TARGET" == "diff_attn" || "$TARGET" == "V91" ]]; then
+  run_bench "V91_diff_attn_sota" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd \
+     DIFF_TRANSFORMER=1"
+fi
+
+if [[ "$TARGET" == "diff_attn" || "$TARGET" == "V92" ]]; then
+  run_bench "V92_diff_layer9_sota" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd \
+     DIFF_TRANSFORMER=1 HYBRID_NORM=1 SSNORM=1"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PERI-LN GROUP (V93-V94) — Peri-LN arXiv:2502.02732 (Gemma/OLMo 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ "$TARGET" == "peri_ln" || "$TARGET" == "V93" ]]; then
+  run_bench "V93_peri_ln" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     PERI_LN=1"
+fi
+
+if [[ "$TARGET" == "peri_ln" || "$TARGET" == "V94" ]]; then
+  run_bench "V94_peri_ln_ssnorm" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd \
+     PERI_LN=1 SSNORM=1"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
