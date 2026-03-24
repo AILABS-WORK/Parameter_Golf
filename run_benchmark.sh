@@ -21,6 +21,7 @@
 #   bash run_benchmark.sh denseformer     # DenseFormer DWA cross-layer aggregation (V98)
 #   bash run_benchmark.sh numuon          # NuMuon nuclear-norm proximal step (V99)
 #   bash run_benchmark.sh mudd            # MUDDFormer dynamic dense connections (V100-V101)
+#   bash run_benchmark.sh lotion          # LOTION smooth QAT (V102)
 #   bash run_benchmark.sh V44             # single variant by ID
 #
 # Output:
@@ -685,6 +686,15 @@ if [[ "$TARGET" == "mudd" || "$TARGET" == "V101" ]]; then
     "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
      GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd \
      MUDD_STREAMS=3"
+fi
+
+# LOTION GROUP (V102) — Smooth Quantization via Calibrated Noise arXiv:2510.08757
+# Replaces STE with σ=sB*sqrt(Δ(1-Δ)) noise injection. Convergence-guaranteed QAT.
+if [[ "$TARGET" == "lotion" || "$TARGET" == "V102" ]]; then
+  run_bench "V102_lotion" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd \
+     LOTION=1 QAT_START_FRACTION=0.0"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════

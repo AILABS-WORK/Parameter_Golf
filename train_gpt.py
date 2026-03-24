@@ -143,6 +143,12 @@ class Hyperparameters:
     ste_qat = bool(int(os.environ.get("STE_QAT", 0)))
     qat_start_fraction = float(os.environ.get("QAT_START_FRACTION", 0.6))
 
+    # LOTION: smooth quantization via calibrated stochastic noise (arXiv:2510.08757).
+    # Replaces STE: adds noise σ=sB*sqrt(Δ(1-Δ)) to weights (Δ=fractional bin distance).
+    # Provides convergence guarantees unlike STE. Mutually exclusive with STE_QAT.
+    # Uses same qat_start_fraction for when to activate.
+    lotion = bool(int(os.environ.get("LOTION", 0)))
+
     # WSD LR: cosine warmdown schedule instead of default linear.
     wsd_lr = bool(int(os.environ.get("WSD_LR", 0)))
 
@@ -915,6 +921,25 @@ def ste_quantize(x: Tensor, bits: int = 6) -> Tensor:
     return x + (x_q * scale - x).detach()
 
 
+def lotion_quantize(x: Tensor, bits: int = 6) -> Tensor:
+    """LOTION: smooth quantization via calibrated stochastic noise (arXiv:2510.08757).
+    Replaces STE with a principled smoothed objective that has convergence guarantees.
+    Train: adds noise ε~N(0,σ²) where σ=sB*sqrt(Δ(1-Δ)), Δ=fractional bin distance.
+    Eval (no_grad): falls back to hard quantization (same as STE export behavior).
+    Noise is maximum at midpoints between bins (Δ=0.5) and zero at grid points."""
+    qmax = (1 << (bits - 1)) - 1
+    scale = x.abs().max(dim=-1, keepdim=True)[0].clamp(min=1e-8) / qmax
+    if not torch.is_grad_enabled():
+        # Eval: hard quantization (weights already trained to align with bins)
+        x_q = (x / scale).clamp(-qmax, qmax).round()
+        return x + (x_q * scale - x).detach()
+    # Train: calibrated noise injection
+    x_scaled = (x / scale).clamp(-qmax, qmax)
+    delta = x_scaled - x_scaled.floor()  # in [0, 1): 0=at bin, 0.5=midpoint
+    noise_std = (scale * (delta * (1.0 - delta)).sqrt()).detach()
+    return x + noise_std * torch.randn_like(x)
+
+
 # -----------------------------
 # TRANSFORMER MODULES
 # -----------------------------
@@ -947,13 +972,16 @@ class SSRMSNorm(nn.Module):
 class CastedLinear(nn.Linear):
     # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
     # STE QAT: set _ste_qat=True to quantize weights in forward (straight-through in backward).
+    # LOTION: set _lotion=True to use calibrated noise injection instead of STE (arXiv:2510.08757).
     _ste_qat: bool = False
     _ste_qat_bits: int = 6
+    _lotion: bool = False  # mutually exclusive with _ste_qat; takes priority when both set
 
     def forward(self, x: Tensor) -> Tensor:
         w = self.weight
-        if CastedLinear._ste_qat and w.ndim == 2 and not getattr(self, "_zero_init", False):
-            w = ste_quantize(w, bits=CastedLinear._ste_qat_bits)
+        if (CastedLinear._ste_qat or CastedLinear._lotion) and w.ndim == 2 and not getattr(self, "_zero_init", False):
+            bits = CastedLinear._ste_qat_bits
+            w = lotion_quantize(w, bits=bits) if CastedLinear._lotion else ste_quantize(w, bits=bits)
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w.to(x.dtype), bias)
 
@@ -1908,12 +1936,18 @@ def main() -> None:
     else:
         swa_start_step = args.iterations + 1  # never trigger
 
-    # STE QAT: activate from step 0 if qat_start_fraction=0, else activate mid-training.
-    qat_start_step = max(1, int(args.iterations * args.qat_start_fraction)) if args.ste_qat else args.iterations + 1
-    if args.ste_qat and args.qat_start_fraction == 0.0:
-        CastedLinear._ste_qat = True
+    # STE QAT / LOTION: activate from step 0 if qat_start_fraction=0, else activate mid-training.
+    # LOTION takes priority over STE when both are set.
+    _qat_active = args.ste_qat or args.lotion
+    qat_start_step = max(1, int(args.iterations * args.qat_start_fraction)) if _qat_active else args.iterations + 1
+    if _qat_active and args.qat_start_fraction == 0.0:
         CastedLinear._ste_qat_bits = args.quant_bits
-        log0(f"ste_qat:activated from step 0 bits:{args.quant_bits}")
+        if args.lotion:
+            CastedLinear._lotion = True
+            log0(f"lotion:activated from step 0 bits:{args.quant_bits}")
+        else:
+            CastedLinear._ste_qat = True
+            log0(f"ste_qat:activated from step 0 bits:{args.quant_bits}")
 
     # -----------------------------
     # MAIN TRAINING LOOP
@@ -1962,11 +1996,15 @@ def main() -> None:
                 )
             break
 
-        # STE QAT: activate mid-training when qat_start_fraction > 0.
-        if args.ste_qat and step == qat_start_step and not CastedLinear._ste_qat:
-            CastedLinear._ste_qat = True
+        # STE QAT / LOTION: activate mid-training when qat_start_fraction > 0.
+        if _qat_active and step == qat_start_step and not CastedLinear._ste_qat and not CastedLinear._lotion:
             CastedLinear._ste_qat_bits = args.quant_bits
-            log0(f"ste_qat:activated step:{step} bits:{args.quant_bits}")
+            if args.lotion:
+                CastedLinear._lotion = True
+                log0(f"lotion:activated step:{step} bits:{args.quant_bits}")
+            else:
+                CastedLinear._ste_qat = True
+                log0(f"ste_qat:activated step:{step} bits:{args.quant_bits}")
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)

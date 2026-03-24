@@ -411,6 +411,18 @@ if [[ "$TARGET" == "all" || "$TARGET" == "tier11" || "$TARGET" == "V101" ]]; the
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TIER 12 — LOTION: Smooth Quantization via Stochastic Noise (arXiv:2510.08757)
+# ═══════════════════════════════════════════════════════════════════════════════
+#   V102: LOTION QAT from step 0 — replaces STE with calibrated noise injection.
+#         σ=sB*sqrt(Δ(1-Δ)) noise convergence guarantee. STE is biased; LOTION is not.
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier12" || "$TARGET" == "V102" ]]; then
+  run_rp "V102_lotion" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT LOTION=1 QAT_START_FRACTION=0.0"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""

@@ -309,6 +309,14 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 - **Expected gain**: −0.008 to −0.015 BPB
 - **Control var**: `DENSEFORMER=1` → V98 in run_runpod.sh
 
+#### ✅ LOTION — Smooth QAT via Calibrated Noise (arXiv:2510.08757) **IMPLEMENTED**
+- **What**: Replaces STE (biased, no convergence guarantee) with noise injection: `ε ~ N(0, sB²·Δ(1-Δ))` where `Δ = fractional_part(w/sB)`. Noise peaks at bin midpoints (Δ=0.5) and vanishes at grid points (Δ=0,1), creating a smooth "attraction basin" around quantization bins.
+- **Why it works over STE**: STE approximates `∂Q(w)/∂w ≈ 1` — provably biased. LOTION trains on `E[L(w+ε)]` — the smoothed objective has exact gradients. The optimizer naturally drives weights to quantization bins to reduce its own noise variance.
+- **Convergence guarantee**: Unlike STE, converges to a local minimum of the original quantized loss.
+- **Expected gain**: −0.005 to −0.015 BPB vs STE. Synergizes strongly with GPTQ-Lite (better weight priors → better hessian-guided rounding).
+- **At eval time**: Falls back to hard quantization (noise injection only active when `torch.is_grad_enabled()`).
+- **Control var**: `LOTION=1 QAT_START_FRACTION=0.0` → V102 in run_runpod.sh
+
 ### Summary Table
 
 | Paper | arXiv | Tier | Expected BPB | Complexity | Status |
@@ -321,6 +329,7 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 | WSM Merging | 2507.17634 | A | −0.003/−0.006 | Low | ✅ WSM=1 |
 | MUDDFormer | 2502.12170 | A | −0.015/−0.035 | High | ✅ MUDD_STREAMS=1/3 |
 | NuMuon | 2603.03597 | A | −0.003/−0.008 | Low | ✅ NUMUON_WEIGHT=1e-4 |
+| LOTION | 2510.08757 | A | −0.005/−0.015 | Low | ✅ LOTION=1 |
 | MASA | 2508.04581 | B | −0.005/−0.015 | High | todo |
 | AGGC | 2601.11864 | B | −0.001/−0.004 | Low | ✅ AGGC_BETA=0.99 |
 | Peri-LN | 2502.02732 | B | −0.002/−0.006 | Low | ✅ PERI_LN=1 |
