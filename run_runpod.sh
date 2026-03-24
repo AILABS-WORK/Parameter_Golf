@@ -244,6 +244,45 @@ if [[ "$TARGET" == "all" || "$TARGET" == "tier3" || "$TARGET" == "V59" ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TIER 4 — WSM + NuMuon variants (from research agent findings, 2026-03-24)
+#   V86: WSM alone (no warmdown, stable-LR checkpoint merge)
+#   V87: WSM + SOTA stack (replaces warmdown with merge)
+#   V88: WSM + HybridNorm + SSNorm (all no-cost improvements stacked)
+#   V89: WSM + TTT + LeakyReLU² (frontier: every technique stacked)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier4" || "$TARGET" == "V86" ]]; then
+  # WSM alone on SOTA stack: no warmdown, merge last 30% of checkpoints
+  run_rp "V86_wsm" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     WSM=1 WSM_MERGE_FRACTION=0.3 SWA_INTERVAL=50"
+fi
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier4" || "$TARGET" == "V87" ]]; then
+  # WSM + full quantized SOTA (replaces WARMDOWN_ITERS with stable-phase merge)
+  run_rp "V87_wsm_sota" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT WSM=1 WSM_MERGE_FRACTION=0.3 SWA_INTERVAL=50"
+fi
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier4" || "$TARGET" == "V88" ]]; then
+  # WSM + HybridNorm + SSNorm + SOTA (stack all zero-cost improvements)
+  run_rp "V88_wsm_layer9" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT HYBRID_NORM=1 SSNORM=1 WSM=1 WSM_MERGE_FRACTION=0.3 SWA_INTERVAL=50"
+fi
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier4" || "$TARGET" == "V89" ]]; then
+  # Full frontier stack: WSM + Layer9 + TTT + LeakyReLU² (kitchen sink v2)
+  run_rp "V89_frontier_stack" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT HYBRID_NORM=1 SSNORM=1 \
+     WSM=1 WSM_MERGE_FRACTION=0.3 SWA_INTERVAL=50 \
+     MLP_ACTIVATION=leaky_relu2 LEAKY_RELU_ALPHA=0.5 \
+     TTT_EPOCHS=10 TTT_LR=0.0001"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""

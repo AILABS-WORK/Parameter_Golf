@@ -198,6 +198,15 @@ class Hyperparameters:
     ttt_lr = float(os.environ.get("TTT_LR", 1e-4))
     ttt_chunk_size = int(os.environ.get("TTT_CHUNK_SIZE", 0))  # 0 = same as train_seq_len
 
+    # WSM — Warmup-Stable-Merge (arXiv:2507.17634).
+    # Replaces LR warmdown entirely with constant-LR training + post-training checkpoint merge.
+    # Key insight: merging N checkpoints from the stable-LR phase approximates LR decay
+    # while keeping LR at full strength throughout, giving more training signal.
+    # Outperforms WSD, EMA, and standard SWA on downstream benchmarks.
+    # wsm_merge_fraction: fraction of training to collect merge checkpoints from (e.g. 0.3 = last 30%)
+    wsm = bool(int(os.environ.get("WSM", 0)))
+    wsm_merge_fraction = float(os.environ.get("WSM_MERGE_FRACTION", 0.3))
+
     # HybridNorm (arXiv:2503.04598): Pre-Norm on attention, Post-Norm on FFN.
     # Combines training stability of Pre-Norm with quality advantage of Post-Norm.
     # Safe because QK-norm already stabilizes the attention path.
@@ -1570,7 +1579,9 @@ def main() -> None:
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
-        if args.warmdown_iters <= 0:
+        # WSM: hold LR constant throughout — no decay phase.
+        # Checkpoints from the stable phase are merged post-training instead.
+        if args.wsm or args.warmdown_iters <= 0:
             return 1.0
         if max_wallclock_ms is None:
             warmdown_start = max(args.iterations - args.warmdown_iters, 0)
@@ -1636,9 +1647,18 @@ def main() -> None:
     tight_swa_count = 0
 
     # SWA: initialize averaging model and step threshold.
+    # WSM overrides: collect from the last wsm_merge_fraction of stable-LR training.
+    # Standard SWA: collect from swa_start_fraction onward (during/after warmdown).
     swa_model: nn.Module | None = None
     swa_count = 0
-    swa_start_step = max(1, int(args.iterations * args.swa_start_fraction)) if args.swa else args.iterations + 1
+    if args.wsm:
+        wsm_start_step = max(1, int(args.iterations * (1.0 - args.wsm_merge_fraction)))
+        swa_start_step = wsm_start_step
+        log0(f"wsm:enabled merge_fraction={args.wsm_merge_fraction} collect_from_step:{wsm_start_step}")
+    elif args.swa:
+        swa_start_step = max(1, int(args.iterations * args.swa_start_fraction))
+    else:
+        swa_start_step = args.iterations + 1  # never trigger
 
     # STE QAT: activate from step 0 if qat_start_fraction=0, else activate mid-training.
     qat_start_step = max(1, int(args.iterations * args.qat_start_fraction)) if args.ste_qat else args.iterations + 1
@@ -1762,8 +1782,9 @@ def main() -> None:
                     for p_swa, p_cur in zip(tight_swa_model.parameters(), base_model.parameters()):
                         p_swa.data.lerp_(p_cur.data.to(p_swa.device), w)
 
-        # SWA: update running average of model weights.
-        if args.swa and step >= swa_start_step and step % args.swa_interval == 0:
+        # SWA / WSM: update running average of model weights.
+        # WSM uses the same mean-merge averaging but triggered from stable LR phase.
+        if (args.swa or args.wsm) and step >= swa_start_step and step % args.swa_interval == 0:
             if swa_model is None:
                 swa_model = copy.deepcopy(base_model)
                 swa_count = 1
@@ -1797,9 +1818,9 @@ def main() -> None:
         if stop_after_step is None and reached_cap:
             stop_after_step = step
 
-    # SWA: swap averaged weights into base_model for evaluation and serialization.
-    if args.swa and swa_model is not None:
-        log0(f"swa:applying averaged model (count={swa_count})")
+    # SWA / WSM: swap averaged weights into base_model for evaluation and serialization.
+    if (args.swa or args.wsm) and swa_model is not None:
+        log0(f"{'wsm' if args.wsm else 'swa'}:applying averaged model (count={swa_count})")
         with torch.no_grad():
             for p_base, p_swa in zip(base_model.parameters(), swa_model.parameters()):
                 p_base.data.copy_(p_swa.data.to(p_base.device))
