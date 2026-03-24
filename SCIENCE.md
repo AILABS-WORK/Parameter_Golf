@@ -294,10 +294,10 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 - **Expected gain**: −0.003 to −0.008 BPB
 - **Control var**: `NUMUON_WEIGHT=1e-4`
 
-#### AGGC — Adaptive Group Gradient Clipping (arXiv:2601.11864)
+#### ✅ AGGC — Adaptive Group Gradient Clipping (arXiv:2601.11864) **IMPLEMENTED**
 - **What**: Per-parameter-group EMA-tracked gradient norm history → adaptive clip thresholds. Protects embedding/norm parameters (which fall through Muon to AdamW) from over-clipping.
 - **Expected gain**: −0.001 to −0.004 BPB
-- **Implementation complexity**: Low — add EMA tracking per group in optimizer step.
+- **Control var**: `AGGC_BETA=0.99 AGGC_THRESHOLD=3.0` → V97 in run_runpod.sh
 
 #### ✅ HybridNorm variant — Peri-LN (arXiv:2502.02732, ICML 2025) **IMPLEMENTED**
 - **What**: Places LayerNorm on BOTH input AND output of each sublayer. Unifies Pre-LN and output-LN. Used in Gemma, OLMo families.
@@ -317,7 +317,7 @@ Post-quant penalty for unquantized V0: +0.2444 BPB (expected — no QAT). Compet
 | MUDDFormer | 2502.12170 | A | −0.020/−0.040 | High | pending research |
 | NuMuon | 2603.03597 | A | −0.003/−0.008 | Low | pending (compressibility) |
 | MASA | 2508.04581 | B | −0.005/−0.015 | High | todo |
-| AGGC | 2601.11864 | B | −0.001/−0.004 | Low | todo |
+| AGGC | 2601.11864 | B | −0.001/−0.004 | Low | ✅ AGGC_BETA=0.99 |
 | Peri-LN | 2502.02732 | B | −0.002/−0.006 | Low | ✅ PERI_LN=1 |
 
 *Stacking all Tier S+A techniques (assuming 0.6× synergy discount): estimated −0.050 to −0.100 BPB over existing SOTA stack.*

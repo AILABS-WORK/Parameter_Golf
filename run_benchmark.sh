@@ -17,6 +17,7 @@
 #   bash run_benchmark.sh layer9          # HybridNorm + SSNorm ablations (V80-V85)
 #   bash run_benchmark.sh diff_attn       # Differential Transformer ablations (V90-V92)
 #   bash run_benchmark.sh peri_ln         # Peri-LN ablations (V93-V94)
+#   bash run_benchmark.sh aggc            # Adaptive Group Gradient Clipping (V97)
 #   bash run_benchmark.sh V44             # single variant by ID
 #
 # Output:
@@ -630,6 +631,17 @@ if [[ "$TARGET" == "peri_ln" || "$TARGET" == "V94" ]]; then
     "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
      GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd \
      PERI_LN=1 SSNORM=1"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AGGC GROUP (V97) — Adaptive Group Gradient Clipping arXiv:2601.11864
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if [[ "$TARGET" == "aggc" || "$TARGET" == "V97" ]]; then
+  run_bench "V97_aggc" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     GPTQ_LITE=1 QUANT_BITS=6 COMPRESS_METHOD=zstd \
+     AGGC_BETA=0.99 AGGC_THRESHOLD=3.0"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -153,6 +153,14 @@ class Hyperparameters:
     # theoretically optimal. WSD_LR overrides WSD_POWER when both are set.
     wsd_power = float(os.environ.get("WSD_POWER", 1.0))
 
+    # AGGC: Adaptive Group Gradient Clipping (arXiv:2601.11864, ICLR 2026).
+    # Tracks per-optimizer-group gradient norm EMA. Clips each group if current
+    # norm > aggc_threshold × ema_norm. Protects embedding/norm params (Adam groups)
+    # that have very different gradient scales from Muon matrix params.
+    # 0.0 = disabled; typical: aggc_beta=0.99 aggc_threshold=3.0
+    aggc_beta = float(os.environ.get("AGGC_BETA", 0.0))
+    aggc_threshold = float(os.environ.get("AGGC_THRESHOLD", 3.0))
+
     # TWEO: colinearity penalty lambda (arXiv:2511.23225). 0 = disabled.
     tweo_lambda = float(os.environ.get("TWEO_LAMBDA", 0.0))
 
@@ -1859,6 +1867,29 @@ def main() -> None:
 
         if args.grad_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(base_model.parameters(), args.grad_clip_norm)
+
+        # AGGC: Adaptive Group Gradient Clipping (arXiv:2601.11864).
+        # Per-optimizer-group EMA of gradient norms; clip if current > threshold * ema.
+        if args.aggc_beta > 0:
+            for opt in optimizers:
+                for group in opt.param_groups:
+                    if "aggc_norm_ema" not in group:
+                        group["aggc_norm_ema"] = 0.0
+                    group_norm = math.sqrt(sum(
+                        p.grad.detach().norm().item() ** 2
+                        for p in group["params"] if p.grad is not None
+                    ))
+                    group["aggc_norm_ema"] = (
+                        args.aggc_beta * group["aggc_norm_ema"]
+                        + (1.0 - args.aggc_beta) * group_norm
+                    )
+                    clip_val = args.aggc_threshold * group["aggc_norm_ema"]
+                    if group_norm > clip_val > 0:
+                        scale = clip_val / group_norm
+                        for p in group["params"]:
+                            if p.grad is not None:
+                                p.grad.detach().mul_(scale)
+
         for opt in optimizers:
             opt.step()
         zero_grad_all()

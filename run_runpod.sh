@@ -360,6 +360,17 @@ if [[ "$TARGET" == "all" || "$TARGET" == "tier7" || "$TARGET" == "V96" ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TIER 8 — Adaptive Group Gradient Clipping (arXiv:2601.11864)
+# ═══════════════════════════════════════════════════════════════════════════════
+#   V97: AGGC β=0.99 on full SOTA — tests per-group adaptive gradient clipping
+
+if [[ "$TARGET" == "all" || "$TARGET" == "tier8" || "$TARGET" == "V97" ]]; then
+  run_rp "V97_aggc" \
+    "$SOTA_BASE XSA_LAST_N=4 EMA=1 EMA_DECAY=0.997 PARTIAL_ROPE_DIMS=16 LN_SCALE=1 \
+     $SOTA_QUANT AGGC_BETA=0.99 AGGC_THRESHOLD=3.0"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════════
 echo ""
